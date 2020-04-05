@@ -39,8 +39,8 @@ using namespace tiny_dnn;
 using namespace tiny_dnn::layers;
 using namespace tiny_dnn::activation;
 
-const int nGridX = 8; // Number of grids along x (left - right)
-const int nGridZ = 8; // Number of grids along z (front - back)
+const int nGridX = 6; // Number of grids along x (left - right)
+const int nGridZ = 6; // Number of grids along z (front - back)
 const float fThresh = 0.05f; // in meter
 const int nImageSw =  32;
 const int nImageSh = 32;
@@ -83,12 +83,6 @@ void ground_removal(pcl::PointCloud<pcl::PointXYZRGB>::Ptr pcloud,
   pcl::PointXYZRGB minPoint, maxPoint;
   pcl::getMinMax3D(*pcloud, minPoint, maxPoint);
 
-  /**
-  std::cout << "min point: ";
-  print_point(minPoint);
-  std::cout << "max point: ";
-  print_point(maxPoint); **/
-
   // Calc the size of a grid
   float fGridX = (maxPoint.x - minPoint.x) / nGridX;
   float fGridZ = (maxPoint.z - minPoint.z) / nGridZ;
@@ -96,10 +90,6 @@ void ground_removal(pcl::PointCloud<pcl::PointXYZRGB>::Ptr pcloud,
   // Get absolute values
   fGridX = (fGridX > 0)? fGridX : (-1 * fGridX);
   fGridZ = (fGridZ > 0)? fGridZ : (-1 * fGridZ);
-
-  /**
-  std::cout << "GridWidth: " << fGridX 
-            << " GridLength: " << fGridZ << std::endl; **/
 
   pcl::PointXYZ minBox, maxBox; // the 3D point of a box
   // Assign the values for the first grid
@@ -294,22 +284,18 @@ void project_to_image(pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud, cv::Mat& ima
   // Calculate the image bound on this flat cloud
   pcl::getMinMax3D(*projection, minBox, maxBox);
 
-  std::cout << "Projection size: " << projection->size() << std::endl;
-
   // Create black image of size nImageS * nImageS
   image = cv::Mat(nImageSh, nImageSw, CV_8UC3, cv::Scalar(12,12,12)); 
 
   float ratio_x = nImageSw / (maxBox.x - minBox.x);
   float ratio_y = nImageSh / (maxBox.y - minBox.y); 
 
-  for (std::size_t i = 0; i < projection->points.size (); ++i){
-    cv::circle(image, Point(fabs(projection->points[i].x - minBox.x) * ratio_x,
-                                 fabs(projection->points[i].y - maxBox.y) * ratio_y), 2, 
-                              Scalar(projection->points[i].b, projection->points[i].g, projection->points[i].r), 2);
-  }
-
-  //record_image(image);
-  // /view_point_cloud(projection);
+  for (pcl::PointCloud<pcl::PointXYZRGB>::iterator it = projection->begin();
+      it != projection->end(); ++it){
+      cv::circle(image, Point(fabs(it->x - minBox.x) * ratio_x,
+                                 fabs(it->y - maxBox.y) * ratio_y), 2, 
+                              Scalar(it->b, it->g, it->r), 2);
+  } 
 }
 
 void get_cone_list(std::vector<pcl::PointCloud<pcl::PointXYZRGB>::Ptr>& cluster_collection,
@@ -318,41 +304,54 @@ void get_cone_list(std::vector<pcl::PointCloud<pcl::PointXYZRGB>::Ptr>& cluster_
   cv::Mat_<uint8_t> gray_scale;
   pcl::PointXYZRGB minp, maxp; // for the cluster's centroid
   cone thisCone;
-  for (size_t i = 0; i < cluster_collection.size(); ++i){
-    project_to_image(cluster_collection[i], image); 
-    pcl::getMinMax3D(*cluster_collection[i], minp, maxp);
+  vec_t pred;
+
+  // Define iterator
+  std::vector<pcl::PointCloud<pcl::PointXYZRGB>::Ptr>::iterator cluster_iterator;
+
+  for (cluster_iterator =  cluster_collection.begin(); 
+       cluster_iterator != cluster_collection.end(); 
+       cluster_iterator++)
+  {
+    project_to_image(*cluster_iterator, image); 
+    pcl::getMinMax3D(*(*cluster_iterator), minp, maxp);
     // Convert the colour image to gray scale
-    cv::cvtColor(image, gray_scale, cv::COLOR_RGB2GRAY);
+    // Painful lesson, OPENCV uses BGR not RGB, and the impage created above is considered as BGR
+    cv::cvtColor(image, gray_scale, cv::COLOR_BGR2GRAY);
     vec_t  vimage;
     std::transform(gray_scale.begin(), gray_scale.end(), std::back_inserter(vimage),
                   [=](uint8_t c) {return c; });
 
-    thisCone.cone_class = net.predict_label(vimage);
-    thisCone.cone_accuy = (int)(net.predict(vimage)[thisCone.cone_class]);
+    pred = net.predict(vimage);
+    thisCone.cone_class = std::distance(pred.begin(), std::max_element(pred.begin(), pred.end()));
+    thisCone.cone_accuy = (int)(pred[thisCone.cone_class] * 100);
 
     // if the accuracy of the prediction is less than 70 then declare as unknown.
-    //if (thisCone.cone_accuy < 70) thisCone.cone_class = -1 ;
+    if (thisCone.cone_accuy < 70) thisCone.cone_class = -1 ;
 
     thisCone.x = (maxp.x + minp.x) / 2; // Horizontal 
     thisCone.y = (maxp.y + minp.y) / 2; // Vertical
     thisCone.z = (maxp.z + maxp.z) / 2; // Sideways 
     cone_collection.push_back(thisCone);
   }
-
 }
 
 void initialise(const std::string& weight){
   // Load the network
   // Define the layers
-  net << conv(32, 32, 5, 1, 6, padding::same) << activation::tanh()   //in 32x32x1, 5x5conv 6fmap
-      << max_pool(32, 32, 6, 2) << activation::tanh()                 //in 32x32x6, 2x2pooling
-      << conv(16, 16, 5, 6, 16, padding::same) << activation::tanh()  //in 16x16x6, 5x5conv 16fmaps
-      << max_pool(16, 16, 16, 2) << activation::tanh()                //in 16x16x16, 2x2pooling
-      << fc(8*8*16, 128) << activation::tanh()
-      << fc(128, 64) << activation::tanh()
-      << fc(64, 16) << activation::tanh()
-      << fc(16, 4) << softmax();                                    //in 16 out 4
+ net << conv(32, 32, 7, 1, 32, padding::same) << activation::tanh()
+     << max_pool(32, 32, 32, 2) << activation::tanh()
+     << conv(32, 16, 5, 16, 32, padding::same) << activation::tanh()
+     << max_pool(64, 16, 16, 2) << activation::tanh()
+     << conv(64, 8, 3, 8, 16, padding::same) << activation::tanh()
+     << max_pool(128, 8, 8, 2) << activation::tanh()
+     << conv(128, 4, 3, 4, 2, padding::same)
+     << fc(8*8*16, 128) << activation::tanh()
+     << fc(128, 64) << activation::tanh()
+     << fc(64, 16) << activation::tanh()
+     << fc(16, 3) << softmax();  
 
+  std::cout << "loading weights from: " << weight << std::endl;
   net.load(weight);
 }
 
@@ -436,12 +435,48 @@ int main(int argc, char** argv){
   detection(pcloud, cone_collection);
   // print list of detection
   for (size_t i = 0; i < cone_collection.size(); i++){
-    std::cout << "Class: " << cone_collection[i].cone_class
+    std::cout << " Class: " << cone_collection[i].cone_class
+              << " Accuy: " << cone_collection[i].cone_accuy
               << " X: " << cone_collection[i].x
               << " Y: " << cone_collection[i].y
               << " Z: " << cone_collection[i].z
               << std::endl;
   }
+
+  // Print all yellow cones
+  std::cout << "Yellow Cones:" << std::endl;
+  for (size_t i = 0; i < cone_collection.size(); i++){
+    if (cone_collection[i].cone_class == 0 ) 
+      std::cout << "(" << cone_collection[i].x << "," << cone_collection[i].z << "),";
+  }
+  std::cout << std::endl;
+
+  std::cout << "Blue Cones:" << std::endl;
+    // Print all blue cones
+  for (size_t i = 0; i < cone_collection.size(); i++){
+    if (cone_collection[i].cone_class == 1 ) 
+      std::cout << "(" << cone_collection[i].x << "," << cone_collection[i].z << "),";
+  }
+  std::cout << std::endl;
+
+  std::cout << "Orange Cones:" << std::endl;
+    // Print all blue cones
+  for (size_t i = 0; i < cone_collection.size(); i++){
+    if (cone_collection[i].cone_class == 2 ) 
+      std::cout << "(" << cone_collection[i].x << "," << cone_collection[i].z << "),";
+  }
+  std::cout << std::endl;
+
+
+  std::cout << "Unknows:" << std::endl;
+    // Print all blue cones
+  for (size_t i = 0; i < cone_collection.size(); i++){
+    if (cone_collection[i].cone_class == -1 ) 
+      std::cout << "(" << cone_collection[i].x << "," << cone_collection[i].z << "),";
+  }
+  std::cout << std::endl;
+
+  view_point_cloud(pcloud);
 
   return (0);  
 }
